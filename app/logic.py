@@ -5,6 +5,23 @@ from .manifest import Manifest
 from .models import LatestReport, PermitRecord
 
 
+def ineligible_liveness_nodes(
+    manifest: Manifest,
+    node_ids: list[str],
+    open_permits: list[PermitRecord],
+) -> list[str]:
+    """返回本批探活中不允许上报的节点（有序去重）。
+
+    规则：当前清单中的节点始终可以上报；清单外的节点只有在仍被至少一条
+    未结束许可占用时才可以上报（节点被移出清单后仍需完成恢复探活并结束旧许可）。
+
+    调用方必须在写入探活的同一写事务内传入 ``open_permits``，
+    这样若结束许可先于探活落库生效，会按结束后的状态判定为无资格。
+    """
+    occupied = {n for p in open_permits for n in p.nodes}
+    return sorted({n for n in node_ids if n not in manifest.nodes and n not in occupied})
+
+
 def evaluate_permit_request(
     manifest: Manifest,
     batch: list[str],

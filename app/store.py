@@ -83,19 +83,23 @@ class Store:
 
     # ---- 探活报告 ----
 
-    def add_reports(self, reports: Iterable) -> None:
+    def insert_reports(self, reports: Iterable) -> None:
+        """写入一批探活报告（调用方负责已开启写事务）。
+
+        探活资格与写入必须在同一事务内完成，避免与结束许可交错时
+        用到过期的占用状态。
+        """
         received = to_iso(now_utc())
         rows = [
             (r.node_id, to_iso(r.sampled_at), 1 if r.healthy else 0, r.boot_id, received)
             for r in reports
         ]
-        with self.transaction():
-            self._conn.executemany(
-                "INSERT INTO liveness_reports "
-                "(node_id, sampled_at, healthy, boot_id, received_at) "
-                "VALUES (?,?,?,?,?)",
-                rows,
-            )
+        self._conn.executemany(
+            "INSERT INTO liveness_reports "
+            "(node_id, sampled_at, healthy, boot_id, received_at) "
+            "VALUES (?,?,?,?,?)",
+            rows,
+        )
 
     def latest_reports(self) -> dict[str, LatestReport]:
         with self._lock:

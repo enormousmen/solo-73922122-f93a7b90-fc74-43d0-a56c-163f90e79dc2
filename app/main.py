@@ -5,7 +5,11 @@ import os
 
 from fastapi import FastAPI, HTTPException, Query, Response
 
-from .logic import evaluate_finish, evaluate_permit_request
+from .logic import (
+    evaluate_finish,
+    evaluate_permit_request,
+    ineligible_liveness_nodes,
+)
 from .manifest import load_manifest
 from .models import PermitRecord, now_utc, to_iso
 from .schemas import LivenessBatchIn, PermitRequestIn
@@ -50,13 +54,20 @@ def create_app(db_path: str, manifest_path: str) -> FastAPI:
 
     @app.post("/liveness", status_code=201)
     def post_liveness(batch: LivenessBatchIn):
-        unknown = sorted({r.node_id for r in batch.reports} - manifest.nodes)
-        if unknown:
-            raise HTTPException(
-                status_code=422,
-                detail={"error": "unknown_nodes", "unknown_nodes": unknown},
+        node_ids = sorted({r.node_id for r in batch.reports})
+        # 资格判定与写入在同一写事务内：若结束许可先于此落库生效，
+        # 清单外节点已不再被未结束许可占用，本批按结束后的状态整批拒收。
+        with store.transaction():
+            ineligible = ineligible_liveness_nodes(
+                manifest, node_ids, store.open_permits()
             )
-        store.add_reports(batch.reports)
+            if ineligible:
+                # 保持原有错误结构：这些节点不属于当前清单，且未被未结束许可占用
+                raise HTTPException(
+                    status_code=422,
+                    detail={"error": "unknown_nodes", "unknown_nodes": ineligible},
+                )
+            store.insert_reports(batch.reports)
         return {"accepted": len(batch.reports)}
 
     @app.get("/liveness")
@@ -94,17 +105,11 @@ def create_app(db_path: str, manifest_path: str) -> FastAPI:
     @app.post("/permits", status_code=201)
     def request_permit(req: PermitRequestIn, response: Response):
         nodes = sorted(set(req.nodes))  # 规范化：去重排序
-        unknown = [n for n in nodes if n not in manifest.nodes]
-        if unknown:
-            raise HTTPException(
-                status_code=422,
-                detail={"error": "unknown_nodes", "unknown_nodes": unknown},
-            )
         with store.transaction():  # 并发申请在此串行，守住多数票
             existing = store.get_permit(req.request_id)
             if existing is not None:
                 if list(existing.nodes) == nodes:
-                    # 同号同批重发 -> 返回原许可
+                    # 同号同批重发 -> 返回原许可（即使节点已移出当前清单）
                     response.status_code = 200
                     return permit_view(existing)
                 raise HTTPException(
@@ -114,6 +119,13 @@ def create_app(db_path: str, manifest_path: str) -> FastAPI:
                         "message": "request_id 已存在且节点集合不同",
                         "existing_nodes": list(existing.nodes),
                     },
+                )
+            # 新申请只接受当前清单中的节点
+            unknown = [n for n in nodes if n not in manifest.nodes]
+            if unknown:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"error": "unknown_nodes", "unknown_nodes": unknown},
                 )
             latest = store.latest_reports()
             ok, detail = evaluate_permit_request(
