@@ -1,0 +1,23 @@
+services:
+  permit-api:
+    build: .
+    image: restart-permit-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      DB_PATH: /data/permits.db
+      MANIFEST_PATH: /app/manifest.json
+    volumes:
+      # SQLite 数据落盘到命名卷，服务重启后许可与最新探活记录保留
+      - permit-data:/data
+      # 固定分片清单，只读挂载；改了清单需重启服务生效
+      - ./manifest.json:/app/manifest.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  permit-data:
